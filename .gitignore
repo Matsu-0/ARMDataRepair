@@ -1,0 +1,10 @@
+*.zip
+
+*fig/
+data/
+*results/
+*models/
+*model/
+*target/
+
+*.DS_Store

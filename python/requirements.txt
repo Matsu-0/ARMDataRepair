@@ -1,0 +1,9 @@
+# MasterDetector Python dependencies (for DLinear and PatchTST models)
+# Install: pip install -r python/requirements.txt
+
+# Core (required by both dlinear_model.py and patchtst_model.py)
+numpy>=1.21.0,<3.0.0
+torch>=1.12.0
+
+# Optional: use CPU-only PyTorch to reduce download size (no CUDA/MPS)
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
