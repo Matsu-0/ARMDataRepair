@@ -718,4 +718,32 @@ public class PatchTSTUtil implements TimeSeriesPredictor {
             return false;
         }
     }
+
+    @Override
+    public double[][] predictHorizon(double[][] window, int horizon) {
+        // PatchTST path still uses recursive one-step for multi-horizon
+        if (window.length != p) {
+            throw new IllegalArgumentException("Window size must be " + p);
+        }
+        int cols = window[0].length;
+        double[][] preds = new double[horizon][cols];
+        double[][] cur = new double[p][cols];
+        for (int i = 0; i < p; i++) {
+            cur[i] = window[i].clone();
+        }
+        for (int h = 0; h < horizon; h++) {
+            ArrayList<Double> one = predict(cur);
+            for (int c = 0; c < cols; c++) {
+                preds[h][c] = one.get(c);
+            }
+            for (int i = 0; i < p - 1; i++) {
+                cur[i] = cur[i + 1];
+            }
+            cur[p - 1] = new double[cols];
+            for (int c = 0; c < cols; c++) {
+                cur[p - 1][c] = one.get(c);
+            }
+        }
+        return preds;
+    }
 }

@@ -43,14 +43,14 @@ public class LoadData {
         this.md_len_complete = Integer.parseInt(md_path.split("_")[2].split("\\.")[0]);
         this.random = new Random(seed);
 
-        this.loadMasterDataComplete(md_path);
-        this.loadMasterData(md_path);
+        this.loadDomainDataComplete(md_path);
+        this.loadDomainData(md_path);
         kdTreeComplete = new KDTreeUtil(md_array_complete);
         kdTree = new KDTreeUtil(md_array);
         this.loadTimeSeriesData(td_path);
     }
 
-    private void loadMasterDataComplete(String filename) throws Exception {  // full random sample master
+    private void loadDomainDataComplete(String filename) throws Exception {  // full domain-constraint set
         Scanner sc = new Scanner(new File(filename));
         sc.useDelimiter("\\s*([,\\r\\n])\\s*"); // set separator
         sc.nextLine();
@@ -67,7 +67,7 @@ public class LoadData {
 //        standardization(md_array_complete);
     }
 
-    private void loadMasterData(String filename) throws Exception {  // full random sample master
+    private void loadDomainData(String filename) throws Exception {  // sampled domain constraints
         Scanner sc = new Scanner(new File(filename));
         sc.useDelimiter("\\s*([,\\r\\n])\\s*"); // set separator
         sc.nextLine();

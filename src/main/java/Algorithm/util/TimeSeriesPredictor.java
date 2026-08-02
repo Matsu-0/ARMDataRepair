@@ -9,7 +9,7 @@ import java.util.ArrayList;
 public interface TimeSeriesPredictor {
     
     /**
-     * Train the model.
+     * Train the model (default one-step ahead).
      * @param data training data; each ArrayList&lt;Double&gt; represents multi-variate data at one time step
      */
     void fit(ArrayList<ArrayList<Double>> data);
@@ -20,6 +20,12 @@ public interface TimeSeriesPredictor {
      * @return prediction for the next time step (multi-variate)
      */
     ArrayList<Double> predict(double[][] window);
+
+    /**
+     * Direct multi-step prediction: from {@code window}, predict the next {@code horizon} steps at once.
+     * @return preds[step][dim] with length {@code horizon}
+     */
+    double[][] predictHorizon(double[][] window, int horizon);
     
     /**
      * Get the window size required by the model.

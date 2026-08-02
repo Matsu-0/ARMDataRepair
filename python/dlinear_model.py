@@ -249,12 +249,14 @@ class DLinearPredictor:
         with torch.no_grad():
             output = self.model(window_tensor)
             # output shape: [1, pred_len, n_features]
-            prediction_normalized = output[0, 0, :].cpu().numpy()  # 取第一个预测时间点的所有特征
+            prediction_normalized = output[0].cpu().numpy()  # [pred_len, n_features]
         
         # 反归一化：将预测结果转换回原始尺度
-        prediction = prediction_normalized * self.data_std[0] + self.data_mean[0]
+        prediction = prediction_normalized * self.data_std + self.data_mean
         
-        return prediction.tolist()
+        # flat row-major: [step0_all_dims, step1_all_dims, ...]
+        # pred_len==1 => length = n_features (backward compatible)
+        return prediction.reshape(-1).tolist()
     
     def save_model(self):
         """保存模型"""

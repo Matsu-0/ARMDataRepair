@@ -4,6 +4,7 @@ import java.util.ArrayList;
 public class VARUtil implements TimeSeriesPredictor {
 
     private final int p;
+    private int predLen = 1;
     private ArrayList<ArrayList<Double>> coeffs;
     
     // data normalization parameters (per feature dimension)
@@ -17,114 +18,138 @@ public class VARUtil implements TimeSeriesPredictor {
         this.dataStd = null;
     }
 
-    // Train the model with data to get coefficients
+    public int getPredLen() {
+        return predLen;
+    }
+
+    /** One-step fit (ARM repair default). */
+    @Override
     public void fit(ArrayList<ArrayList<Double>> data) {
+        fit(data, 1);
+    }
+
+    /**
+     * Direct multi-output fit: from lag window of length p, predict the next {@code horizon}
+     * steps jointly (one OLS for stacked targets), not recursive one-step.
+     */
+    public void fit(ArrayList<ArrayList<Double>> data, int horizon) {
+        if (horizon < 1) {
+            throw new IllegalArgumentException("horizon must be >= 1");
+        }
+        this.predLen = horizon;
         int n = data.size();
         int k = data.get(0).size();
+        if (n < p + horizon) {
+            throw new IllegalArgumentException("Not enough samples for p=" + p + ", horizon=" + horizon);
+        }
 
-        // compute normalization parameters (per feature dimension)
         dataMean = new double[k];
         dataStd = new double[k];
-        
-        // compute mean and standard deviation per feature
         for (int col = 0; col < k; col++) {
             double sum = 0.0;
             for (int row = 0; row < n; row++) {
                 sum += data.get(row).get(col);
             }
             dataMean[col] = sum / n;
-            
             double sumSqDiff = 0.0;
             for (int row = 0; row < n; row++) {
                 double diff = data.get(row).get(col) - dataMean[col];
                 sumSqDiff += diff * diff;
             }
             dataStd[col] = Math.sqrt(sumSqDiff / n);
-            
-            // avoid division by zero; if std is 0 set to 1
             if (dataStd[col] < 1e-8) {
                 dataStd[col] = 1.0;
             }
         }
-        
-        // normalize data
+
         ArrayList<ArrayList<Double>> normalizedData = new ArrayList<>();
         for (int i = 0; i < n; i++) {
             ArrayList<Double> normalizedRow = new ArrayList<>();
             for (int j = 0; j < k; j++) {
-                double normalizedValue = (data.get(i).get(j) - dataMean[j]) / dataStd[j];
-                normalizedRow.add(normalizedValue);
+                normalizedRow.add((data.get(i).get(j) - dataMean[j]) / dataStd[j]);
             }
             normalizedData.add(normalizedRow);
         }
 
         ArrayList<ArrayList<Double>> X = new ArrayList<>();
-
-        // construct the data matrix X (using normalized data)
-        for (int i = p; i < n; i++) {
+        ArrayList<ArrayList<Double>> Yarry = new ArrayList<>();
+        // predict indices [i, i+horizon) from lags ending at i-1
+        for (int i = p; i + horizon - 1 < n; i++) {
             ArrayList<Double> x = new ArrayList<>();
             for (int j = 0; j < p; j++) {
                 x.addAll(normalizedData.get(i - j - 1));
             }
             X.add(x);
+
+            ArrayList<Double> y = new ArrayList<>(horizon * k);
+            for (int h = 0; h < horizon; h++) {
+                y.addAll(normalizedData.get(i + h));
+            }
+            Yarry.add(y);
         }
 
-        // compute the coefficients using OLS (using normalized data)
         Matrix Xmat = new Matrix(X);
-        ArrayList<ArrayList<Double>> Yarry = new ArrayList<>();
-        for (int i = p; i < n; i++) {
-            Yarry.add(normalizedData.get(i));
-        }
         Matrix Ymat = new Matrix(Yarry);
         Matrix XtX = Xmat.transpose().multiply(Xmat);
         Matrix XtY = Xmat.transpose().multiply(Ymat);
         Matrix beta = XtX.solve(XtY);
-        this.coeffs = beta.transpose().getData();
+        this.coeffs = beta.transpose().getData(); // (horizon*k) x (p*k)
     }
 
-    // One step of prediction based on window. Window has p tuples.
-    // Return the prediction result.
+    @Override
     public ArrayList<Double> predict(double[][] window) {
-        if (dataMean == null || dataStd == null) {
+        double[][] multi = predictHorizon(window, predLen);
+        ArrayList<Double> first = new ArrayList<>(multi[0].length);
+        for (double v : multi[0]) {
+            first.add(v);
+        }
+        return first;
+    }
+
+    /**
+     * Direct multi-step prediction in one shot.
+     * @return preds[step][dim], length = horizon (must match trained predLen if already fit for that h)
+     */
+    @Override
+    public double[][] predictHorizon(double[][] window, int horizon) {
+        if (dataMean == null || dataStd == null || coeffs == null || coeffs.isEmpty()) {
             throw new IllegalStateException("Model not trained. Please call fit() first.");
         }
-        
+        if (horizon != predLen) {
+            throw new IllegalArgumentException(
+                    "Requested horizon=" + horizon + " but model was fit with predLen=" + predLen);
+        }
+        if (window.length != p) {
+            throw new IllegalArgumentException("Window size must be " + p);
+        }
+
         int k = window[0].length;
-        
-        // normalize input window
         double[][] normalizedWindow = new double[p][k];
         for (int i = 0; i < p; i++) {
             for (int j = 0; j < k; j++) {
                 normalizedWindow[i][j] = (window[i][j] - dataMean[j]) / dataStd[j];
             }
         }
-        
-        // build input vector (using normalized window)
+
         ArrayList<Double> x = new ArrayList<>();
         for (int i = 0; i < p; i++) {
-            ArrayList<Double> tuple = new ArrayList<>();
             for (double value : normalizedWindow[p - i - 1]) {
-                tuple.add(value);
+                x.add(value);
             }
-            x.addAll(tuple);
-        }
-        
-        // predict (in normalized space)
-        double[] yhat = new double[k];
-        for (int j = 0; j < k; j++) {
-            for (int i = 0; i < x.size(); i++) {
-                yhat[j] += x.get(i) * coeffs.get(j).get(i);
-            }
-        }
-        
-        // denormalize: convert prediction back to original scale
-        ArrayList<Double> prediction_tuple = new ArrayList<>();
-        for (int j = 0; j < k; j++) {
-            double denormalizedValue = yhat[j] * dataStd[j] + dataMean[j];
-            prediction_tuple.add(denormalizedValue);
         }
 
-        return prediction_tuple;
+        double[][] preds = new double[horizon][k];
+        for (int h = 0; h < horizon; h++) {
+            for (int j = 0; j < k; j++) {
+                int row = h * k + j;
+                double yhat = 0.0;
+                for (int i = 0; i < x.size(); i++) {
+                    yhat += x.get(i) * coeffs.get(row).get(i);
+                }
+                preds[h][j] = yhat * dataStd[j] + dataMean[j];
+            }
+        }
+        return preds;
     }
 
     @Override

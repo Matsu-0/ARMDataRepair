@@ -11,6 +11,7 @@ public class DLinearUtil implements TimeSeriesPredictor {
     
     private final int p;  // window size (seq_len)
     private final int columnCnt;  // number of variables
+    private final int predLen;  // direct multi-step output length
     private final String pythonScriptPath;  // path to Python script
     private final String modelDir;  // directory to save/load models
     private final boolean individual;  // whether to model each variable separately
@@ -30,17 +31,27 @@ public class DLinearUtil implements TimeSeriesPredictor {
     private final Object processLock = new Object();  // lock for process access
     
     public DLinearUtil(int p, int columnCnt) {
-        this(p, columnCnt, "./python/dlinear_model.py", "./models", true, 100, 0.001);
+        this(p, columnCnt, 1, "./python/dlinear_model.py", "./models", true, 100, 0.001);
+    }
+
+    public DLinearUtil(int p, int columnCnt, int predLen) {
+        this(p, columnCnt, predLen, "./python/dlinear_model.py", "./models", true, 100, 0.001);
     }
     
     public DLinearUtil(int p, int columnCnt, String pythonScriptPath, String modelDir) {
-        this(p, columnCnt, pythonScriptPath, modelDir, true, 10, 0.001);
+        this(p, columnCnt, 1, pythonScriptPath, modelDir, true, 10, 0.001);
     }
     
     public DLinearUtil(int p, int columnCnt, String pythonScriptPath, String modelDir, 
                       boolean individual, int epochs, double learningRate) {
+        this(p, columnCnt, 1, pythonScriptPath, modelDir, individual, epochs, learningRate);
+    }
+
+    public DLinearUtil(int p, int columnCnt, int predLen, String pythonScriptPath, String modelDir,
+                       boolean individual, int epochs, double learningRate) {
         this.p = p;
         this.columnCnt = columnCnt;
+        this.predLen = Math.max(1, predLen);
         this.pythonScriptPath = pythonScriptPath;
         this.modelDir = modelDir;
         this.individual = individual;
@@ -236,7 +247,9 @@ public class DLinearUtil implements TimeSeriesPredictor {
                 writer.write("  \"seq_len\": ");
                 writer.write(String.valueOf(p));
                 writer.write(",\n");
-                writer.write("  \"pred_len\": 1,\n");
+                writer.write("  \"pred_len\": ");
+                writer.write(String.valueOf(predLen));
+                writer.write(",\n");
                 writer.write("  \"individual\": ");
                 writer.write(String.valueOf(individual));
                 writer.write(",\n");
@@ -425,6 +438,39 @@ public class DLinearUtil implements TimeSeriesPredictor {
     
     @Override
     public ArrayList<Double> predict(double[][] window) {
+        ArrayList<Double> flat = predictFlat(window);
+        if (predLen == 1) {
+            return flat;
+        }
+        ArrayList<Double> first = new ArrayList<>(columnCnt);
+        for (int c = 0; c < columnCnt; c++) {
+            first.add(flat.get(c));
+        }
+        return first;
+    }
+
+    @Override
+    public double[][] predictHorizon(double[][] window, int horizon) {
+        if (horizon != predLen) {
+            throw new IllegalArgumentException(
+                    "Requested horizon=" + horizon + " but model was fit with predLen=" + predLen);
+        }
+        ArrayList<Double> flat = predictFlat(window);
+        if (flat.size() < horizon * columnCnt) {
+            throw new IllegalStateException("DLinear returned " + flat.size()
+                    + " values, expected " + (horizon * columnCnt));
+        }
+        double[][] preds = new double[horizon][columnCnt];
+        for (int h = 0; h < horizon; h++) {
+            for (int c = 0; c < columnCnt; c++) {
+                preds[h][c] = flat.get(h * columnCnt + c);
+            }
+        }
+        return preds;
+    }
+
+    /** Raw flat prediction: length = predLen * columnCnt (row-major). */
+    private ArrayList<Double> predictFlat(double[][] window) {
         // increment prediction call count
         synchronized (DLinearUtil.class) {
             predictCallCount++;
@@ -581,7 +627,9 @@ public class DLinearUtil implements TimeSeriesPredictor {
                 writer.write("  \"seq_len\": ");
                 writer.write(String.valueOf(p));
                 writer.write(",\n");
-                writer.write("  \"pred_len\": 1,\n");
+                writer.write("  \"pred_len\": ");
+                writer.write(String.valueOf(predLen));
+                writer.write(",\n");
                 writer.write("  \"individual\": ");
                 writer.write(String.valueOf(individual));
                 writer.write(",\n");
@@ -750,6 +798,10 @@ public class DLinearUtil implements TimeSeriesPredictor {
     @Override
     public int getWindowSize() {
         return p;
+    }
+
+    public int getPredLen() {
+        return predLen;
     }
     
     /**

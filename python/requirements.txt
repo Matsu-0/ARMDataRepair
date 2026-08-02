@@ -1,4 +1,4 @@
-# MasterDetector Python dependencies (for DLinear and PatchTST models)
+# ARM Data Repair Python dependencies (for DLinear and PatchTST models)
 # Install: pip install -r python/requirements.txt
 
 # Core (required by both dlinear_model.py and patchtst_model.py)
