@@ -37,6 +37,12 @@ public class AddNoise {
     }
 
     private void addNoise() {
+        if (Experiment.td_path != null && Experiment.td_path.contains("/gps/")) {
+            for (int row = 0; row < td_clean.length; row++) {
+                System.arraycopy(td_clean[row], 0, td_dirty[row], 0, td_clean[0].length);
+            }
+            return;
+        }
         int err_flag = 0, error_fault_num = 0, i;
         double err_range_random = 0.0, value_dirty, dist;
         for (int row = 0; row < td_clean.length; row++) {
