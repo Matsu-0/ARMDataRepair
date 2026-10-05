@@ -9,11 +9,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 
-public class ARMDetector {
+public class ARMRepair {
     private final double[][] td;
     private double[][] td_repaired;
     private double[][] td_prediction;  // store predicted values
     private boolean[] td_anomalies;
+    /** Initial domain-constraint flags (eta); independent of residual. */
+    private boolean[] e_domain;
+    /** Initial residual flags (beta vs prediction); independent of domain. */
+    private boolean[] e_model;
     //    private boolean[] anomalies_in_repaired;
     private final KDTreeUtil kdTreeUtil;
     private final long[] td_time;
@@ -34,6 +38,9 @@ public class ARMDetector {
     private final int modelTrainEnd;
 
     private double eta;
+    /** residual threshold for initial E (AnomalyDetector-style Euclidean vs prediction) */
+    private final double beta;
+    private static final double DEFAULT_BETA = 0.4;
     private final int t;  // max repair rounds
     private int actual_rounds;  // rounds actually executed
     private final long cost_time;
@@ -46,23 +53,52 @@ public class ARMDetector {
     /** number of candidates kept for subsequent repair selection */
     private static final int CANDIDATE_TOP_N = 3;
 
-    public ARMDetector(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta) {
-        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, 3, new VARUtil(columnCnt), td.length);
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, DEFAULT_BETA, 3, new VARUtil(p), td.length);
     }
 
-    public ARMDetector(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, TimeSeriesPredictor predictor) {
-        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, 3, predictor, td.length);
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, double beta) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, beta, 3, new VARUtil(p), td.length);
     }
 
-    public ARMDetector(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, int t) {
-        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, t, new VARUtil(columnCnt), td.length);
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, TimeSeriesPredictor predictor) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, DEFAULT_BETA, 3, predictor, td.length);
     }
 
-    public ARMDetector(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, int t, TimeSeriesPredictor predictor) {
-        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, t, predictor, td.length);
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, double beta, TimeSeriesPredictor predictor) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, beta, 3, predictor, td.length);
     }
 
-    public ARMDetector(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, int t, TimeSeriesPredictor predictor, int modelTrainEnd) {
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, int t) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, DEFAULT_BETA, t, new VARUtil(p), td.length);
+    }
+
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, int t, TimeSeriesPredictor predictor) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, DEFAULT_BETA, t, predictor, td.length);
+    }
+
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, double beta, int t, TimeSeriesPredictor predictor) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, beta, t, predictor, td.length);
+    }
+
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, int t, TimeSeriesPredictor predictor, int modelTrainEnd) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, DEFAULT_BETA, t, predictor, modelTrainEnd);
+    }
+
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, double beta, int t, TimeSeriesPredictor predictor, int modelTrainEnd) {
+        this(td, kdTreeUtil, td_time, columnCnt, k, p, eta, beta, t, predictor, modelTrainEnd, false);
+    }
+
+    /**
+     * Detection-only: compute initial E_domain (eta) and E_model (beta) without repair.
+     */
+    public static ARMRepair forDetection(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time,
+                                         int columnCnt, int k, int p, double eta, double beta) {
+        return new ARMRepair(td, kdTreeUtil, td_time, columnCnt, k, p, eta, beta, 3, new VARUtil(p),
+                td.length, true);
+    }
+
+    public ARMRepair(double[][] td, KDTreeUtil kdTreeUtil, long[] td_time, int columnCnt, int k, int p, double eta, double beta, int t, TimeSeriesPredictor predictor, int modelTrainEnd, boolean detectOnly) {
         this.td = td;
         this.kdTreeUtil = kdTreeUtil;
         this.td_time = td_time;
@@ -70,22 +106,29 @@ public class ARMDetector {
         this.k = k;
         this.p = p;
         this.eta = eta;
+        this.beta = beta;
         this.t = Math.max(1, t);
         this.n = td.length;
         this.modelTrainEnd = Math.max(p + 1, Math.min(modelTrainEnd, this.n));
         this.prediction_model = predictor;
         long wallStart = System.nanoTime();
-//        this.testModelOnly(0.8);
-        this.repair();
-        this.wall_time = (System.nanoTime() - wallStart) / 1_000_000L;
-        // reported cost is domain-constraint repair only (exclude detect/fit/predict)
-        this.cost_time = getRepair_time();
-        System.out.println("ARMRepair wall: " + wall_time + "ms, rounds: " + actual_rounds + "/" + this.t
-                + " (train: " + getModel_train_time() + "ms, prediction: " + getPrediction_time()
-                + "ms, avg pred: " + String.format("%.6f", getAvg_prediction_time_ms())
-                + "ms, repair: " + getRepair_time() + "ms)"
-                + ", modelTrainEnd=" + this.modelTrainEnd
-                + (modelTrainEnd < n ? " [pred/repair timed on test only]" : ""));
+        if (detectOnly) {
+            call_std();
+            getOriginalAnomaliesAndLearnModel();
+            this.wall_time = (System.nanoTime() - wallStart) / 1_000_000L;
+            this.cost_time = this.wall_time;
+            System.out.println("ARMRepair detect-only wall: " + wall_time + "ms");
+        } else {
+            this.repair();
+            this.wall_time = (System.nanoTime() - wallStart) / 1_000_000L;
+            this.cost_time = getRepair_time();
+            System.out.println("ARMRepair wall: " + wall_time + "ms, rounds: " + actual_rounds + "/" + this.t
+                    + " (train: " + getModel_train_time() + "ms, prediction: " + getPrediction_time()
+                    + "ms, avg pred: " + String.format("%.6f", getAvg_prediction_time_ms())
+                    + "ms, repair: " + getRepair_time() + "ms)"
+                    + ", modelTrainEnd=" + this.modelTrainEnd
+                    + (modelTrainEnd < n ? " [pred/repair timed on test only]" : ""));
+        }
     }
 
     /** When modelTrainEnd &lt; n (train/test split), only time indices in [modelTrainEnd, n). */
@@ -163,13 +206,30 @@ public class ARMDetector {
         } else return true;
     }
 
+    /** Unnormalized Euclidean distance, same as {@link AnomalyDetector}. */
+    private static double residualDistance(double[] predicted, double[] observed) {
+        double distance = 0d;
+        for (int pos = 0; pos < predicted.length; pos++) {
+            double temp = predicted[pos] - observed[pos];
+            distance += temp * temp;
+        }
+        return Math.sqrt(distance);
+    }
+
     public void getOriginalAnomaliesAndLearnModel() {
         ArrayList<ArrayList<Double>> learning_samples = new ArrayList<>();
         td_anomalies = new boolean[n];
+        e_domain = new boolean[n];
+        e_model = new boolean[n];
+        int domainCount = 0;
         for (int i = 0; i < td.length; i++) {
             double[] tuple = td[i];
             boolean isNormal = checkConsistency(tuple);
+            e_domain[i] = !isNormal;
             td_anomalies[i] = !isNormal;
+            if (!isNormal) {
+                domainCount++;
+            }
             // fit model only on conflict-free points inside the train prefix
             if (isNormal && i < modelTrainEnd) {
                 ArrayList<Double> sample = new ArrayList<>();
@@ -180,7 +240,7 @@ public class ARMDetector {
             }
         }
         if (this.prediction_model == null) {
-            this.prediction_model = new VARUtil(columnCnt);
+            this.prediction_model = new VARUtil(p);
         }
         long trainStart = System.nanoTime();
         this.prediction_model.fit(learning_samples);
@@ -188,27 +248,84 @@ public class ARMDetector {
         System.out.println("ARM model trained on " + learning_samples.size()
                 + " conflict-free points in [0, " + modelTrainEnd + ")"
                 + ", trainTime=" + getModel_train_time() + "ms");
+
+        int residualOnly = unionResidualAnomalies(td);
+        System.out.println("Initial E: domain(eta)=" + domainCount
+                + ", model(beta)=" + countFlags(e_model)
+                + ", residual-only(beta)=" + residualOnly
+                + ", union=" + countAnomalies());
     }
 
     /**
-     * Detect anomalies on the current repaired series. Returns anomaly count.
+     * AnomalyDetector-style residual check on {@code series}: for i &gt;= p,
+     * flag if Euclidean(predict(window), series[i]) &gt; beta.
+     * Unions into {@code td_anomalies}. Returns how many new points were added.
+     * Does not refit the ARM prediction model.
      */
-    private int detectAnomaliesOnCurrent() {
-        int count = 0;
-        td_anomalies = new boolean[n];
-        for (int i = 0; i < n; i++) {
-            boolean isNormal = checkConsistency(td_repaired[i]);
-            td_anomalies[i] = !isNormal;
-            if (!isNormal) {
-                count++;
+    private int unionResidualAnomalies(double[][] series) {
+        int added = 0;
+        for (int i = p; i < n; i++) {
+            double[][] window = getWindow(series, i, p);
+            if (window == null) {
+                continue;
+            }
+            double[] predicted = arrayToList(prediction_model.predict(window));
+            if (residualDistance(predicted, series[i]) > beta) {
+                e_model[i] = true;
+                if (!td_anomalies[i]) {
+                    added++;
+                }
+                td_anomalies[i] = true;
             }
         }
-        return count;
+        return added;
+    }
+
+    /**
+     * Keep only points already in E that still violate domain (eta) or residual (beta)
+     * on the current repaired series. Does not add new points. Returns remaining |E|.
+     */
+    private int retainViolatingAnomalies() {
+        int remaining = 0;
+        int released = 0;
+        for (int i = 0; i < n; i++) {
+            if (!td_anomalies[i]) {
+                continue;
+            }
+            if (stillViolatesEitherConstraint(i)) {
+                remaining++;
+            } else {
+                td_anomalies[i] = false;
+                released++;
+            }
+        }
+        System.out.println("E update: released=" + released + ", remaining=" + remaining);
+        return remaining;
+    }
+
+    /** True if point i still violates eta (domain) or beta (residual vs prediction). */
+    private boolean stillViolatesEitherConstraint(int i) {
+        if (!checkConsistency(td_repaired[i])) {
+            return true;
+        }
+        if (i < p) {
+            return false;
+        }
+        double[][] window = getWindow(td_repaired, i, p);
+        if (window == null) {
+            return false;
+        }
+        double[] predicted = arrayToList(prediction_model.predict(window));
+        return residualDistance(predicted, td_repaired[i]) > beta;
     }
 
     private int countAnomalies() {
+        return countFlags(td_anomalies);
+    }
+
+    private static int countFlags(boolean[] flags) {
         int count = 0;
-        for (boolean flag : td_anomalies) {
+        for (boolean flag : flags) {
             if (flag) {
                 count++;
             }
@@ -448,8 +565,9 @@ public class ARMDetector {
     }
 
     /**
-     * Multi-round repair: each round detects anomalies on the current series then repairs
-     * from start to end, until no anomalies remain or the round limit t is reached.
+     * Multi-round repair: E is computed once (domain ∪ residual). Later rounds only
+     * drop points in E that no longer violate eta or beta. Stop when E is empty
+     * or the round limit t is reached.
      */
     public void repair() {
         call_std();
@@ -460,18 +578,13 @@ public class ARMDetector {
         getOriginalAnomaliesAndLearnModel();
 
         for (int round = 1; round <= t; round++) {
-            int anomalyCount;
-            if (round == 1) {
-                anomalyCount = countAnomalies();
-            } else {
-                anomalyCount = detectAnomaliesOnCurrent();
-            }
+            int anomalyCount = (round == 1) ? countAnomalies() : retainViolatingAnomalies();
             if (anomalyCount == 0) {
-                System.out.println("ARMRepair stopped early at round " + round + ": no anomalies detected");
+                System.out.println("ARMRepair stopped early at round " + round + ": E is empty");
                 break;
             }
             this.actual_rounds = round;
-            System.out.println("ARMRepair round " + round + "/" + t + ": anomalies=" + anomalyCount);
+            System.out.println("ARMRepair round " + round + "/" + t + ": |E|=" + anomalyCount);
             repairInitialWindow();
             forwardRepairing(p);
         }
@@ -500,7 +613,7 @@ public class ARMDetector {
         }
         // if prediction_model is not initialized, use default VAR model
         if (this.prediction_model == null) {
-            this.prediction_model = new VARUtil(columnCnt);
+            this.prediction_model = new VARUtil(p);
         }
         this.prediction_model.fit(learning_samples);
 
@@ -534,6 +647,18 @@ public class ARMDetector {
             list[i] = arrayList.get(i);
         }
         return list;
+    }
+
+    public boolean[] getE_domain() {
+        return e_domain;
+    }
+
+    public boolean[] getE_model() {
+        return e_model;
+    }
+
+    public boolean[] getTd_anomalies() {
+        return td_anomalies;
     }
 
     public double[][] getTd_repaired() {

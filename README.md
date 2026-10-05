@@ -10,8 +10,8 @@ Anomaly detection and error repair for **multivariate time series**, combining a
 
 ## Features
 
-- **ARMDetector**: Core algorithm — multi-round forward repair with a configurable prediction model.
-- **Baselines**: ERRepair, SCREEN, Lsgreedy, IMR, MTCSC.
+- **ARMRepair**: Core algorithm — multi-round forward repair with a configurable prediction model.
+- **Baselines**: ERRepair, SCREEN, Lsgreedy, IMR, MTCSC, DomainNN, ModelOnly, CSDI (detect-then-impute).
 - **Metrics**: RMSE, Precision, Recall, Time, Regression Loss; forecast RMSE on dirty vs repaired series.
 - **Datasets**: Engine, GPS, Road, Weather, Trajectory under `data/`.
 
@@ -25,14 +25,16 @@ ARMDataRepair/
 │   ├── Analysis.java            # Metrics
 │   ├── AddNoise.java / LabelData.java
 │   └── Algorithm/
-│       ├── ARMDetector.java     # Core repair algorithm
+│       ├── ARMRepair.java     # Core repair algorithm
 │       ├── AnomalyDetector.java
 │       ├── EditingRuleRepair.java, SCREEN.java, Lsgreedy.java, IMR.java, MTCSC.java
 │       └── util/                # VARUtil, DLinearUtil, PatchTSTUtil, KDTreeUtil, ...
-├── python/                      # DLinear & PatchTST scripts
+├── python/                      # DLinear, PatchTST, CSDI adapter
 │   ├── dlinear_model.py
 │   ├── patchtst_model.py
+│   ├── csdi_repair.py
 │   └── requirements.txt
+├── baseline/CSDI/               # Official CSDI sources (NeurIPS 2021)
 ├── data/                        # Per-domain time series + domain constraints
 │   └── <domain>/time_series_data_*.csv, master_data_*.csv
 ├── model/data/                  # Repaired / prediction series per run
@@ -92,6 +94,7 @@ Configure paths and which experiment to run in `Experiment.java`:
 | `varyingForecastHorizonDLinear(...)` | Horizon ablation with DLinear. |
 | `get_arm_repaired(rate)` | ARM-only repair RMSE/Time across datasets. |
 | `get_data_repaired(rate)` | ARM vs baselines comparison. |
+| `get_csdi_repaired(rate)` | ARM vs CSDI (self-detect then impute) on a 4000-point prefix. |
 | `main_td_scale()` | Varying time series length. |
 | `main_error_rate()` | Varying error rate. |
 | `main_error_range()` | Varying error magnitude. |
@@ -118,6 +121,7 @@ Dataset indices in `Experiment.init(dataset_idx)`: `0` engine, `1` gps, `2` road
 - **VAR** (default): Pure Java (`VARUtil`). Used with domain-constraint k-NN for repair.
 - **DLinear**: `python/dlinear_model.py` via `DLinearUtil`.
 - **PatchTST**: `python/patchtst_model.py` via `PatchTSTUtil`.
+- **CSDI**: Official code under `baseline/CSDI`; ARM wrapper `python/csdi_repair.py` via `CSDIRepair`. CSDI trains on the dirty series, flags high reconstruction residual, then imputes those points (does not use ARM's error set E). Extra packages: `tqdm` (and the original CSDI `requirements.txt` if you run their scripts).
 
 ## License
 

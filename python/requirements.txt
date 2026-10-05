@@ -1,9 +1,12 @@
-# ARM Data Repair Python dependencies (for DLinear and PatchTST models)
+# ARM Data Repair Python dependencies (DLinear, PatchTST, CSDI)
 # Install: pip install -r python/requirements.txt
 
-# Core (required by both dlinear_model.py and patchtst_model.py)
+# Core (required by dlinear_model.py, patchtst_model.py, csdi_repair.py)
 numpy>=1.21.0,<3.0.0
 torch>=1.12.0
+tqdm
+# Optional: only needed if CSDI diffusion.is_linear is True
+# linear_attention_transformer
 
 # Optional: use CPU-only PyTorch to reduce download size (no CUDA/MPS)
 # pip install torch --index-url https://download.pytorch.org/whl/cpu

@@ -12,6 +12,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.Random;
 import java.util.Scanner;
 
 /**
@@ -52,8 +53,11 @@ public class Experiment {
     static int k;              // ARM: k-NN candidates
     static int p;              // ARM: autoregressive window
     static double eta;         // ARM: domain-constraint threshold
-    static double beta;        // anomaly detection threshold
+    static double beta;        // ARM initial E + AnomalyDetector residual threshold
     static int seed;
+
+    /** Prefix length for CSDI vs ARM (diffusion is too slow on 100k+ points). */
+    static final int CSDI_COMPARE_LEN = 4000;
 
     public static void init(int dataset_idx) {
         switch (dataset_idx) {
@@ -106,8 +110,10 @@ public class Experiment {
         label_rate = 0.2;
         k = 7;
         p = 17;
-        eta = 0.7;
-        beta = 0.4;
+        // eta = 0.7;
+        eta = 1;
+        // beta = 0.4;
+        beta = 1;
         seed = 665;
     }
 
@@ -232,7 +238,7 @@ public class Experiment {
                                      double[][] td_dirty, boolean[] td_bool, boolean[] detect_clean) {
         System.out.println("\nARMRepair");
         int columnCnt = td_clean[0].length;
-        ARMDetector detector = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta);
+        ARMRepair detector = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta);
         double[][] td_repair = detector.getTd_repaired();
         boolean[] detect_repair = AnomalyDetector.detect(td_repair, p, beta);
         return new Analysis(td_time, td_clean, td_repair, td_bool, detector.getCost_time(),
@@ -244,9 +250,46 @@ public class Experiment {
         System.out.println("\nARMRepair (DLinear)");
         int columnCnt = td_clean[0].length;
         DLinearUtil dlinearModel = new DLinearUtil(p, columnCnt);
-        ARMDetector detector = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 1, dlinearModel);
+        ARMRepair detector = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 1, dlinearModel);
         double[][] td_repair = detector.getTd_repaired();
         boolean[] detect_repair = AnomalyDetector.detect(td_repair, p, beta, dlinearModel);
+        return new Analysis(td_time, td_clean, td_repair, td_bool, detector.getCost_time(),
+                detect_clean, detect_repair);
+    }
+
+    public static Analysis domainNnRepair(KDTreeUtil kdTree, long[] td_time, double[][] td_clean,
+                                          double[][] td_dirty, boolean[] td_bool, boolean[] detect_clean) {
+        System.out.println("\nDomainNNRepair");
+        int columnCnt = td_clean[0].length;
+        DomainNNRepair detector = new DomainNNRepair(td_dirty, kdTree, td_time, columnCnt, eta);
+        double[][] td_repair = detector.getTd_repaired();
+        boolean[] detect_repair = AnomalyDetector.detect(td_repair, p, beta);
+        return new Analysis(td_time, td_clean, td_repair, td_bool, detector.getCost_time(),
+                detect_clean, detect_repair);
+    }
+
+    public static Analysis modelOnlyRepair(long[] td_time, double[][] td_clean, double[][] td_dirty,
+                                           boolean[] td_bool, boolean[] detect_clean) {
+        System.out.println("\nModelOnlyRepair");
+        int columnCnt = td_clean[0].length;
+        ModelOnlyRepair detector = new ModelOnlyRepair(td_dirty, td_time, columnCnt, p, beta);
+        double[][] td_repair = detector.getTd_repaired();
+        boolean[] detect_repair = AnomalyDetector.detect(td_repair, p, beta);
+        return new Analysis(td_time, td_clean, td_repair, td_bool, detector.getCost_time(),
+                detect_clean, detect_repair);
+    }
+
+    /**
+     * CSDI trains on the dirty series, flags high reconstruction residual, then
+     * imputes those points. Does not receive ARM's E mask.
+     */
+    public static Analysis csdiRepair(long[] td_time, double[][] td_clean, double[][] td_dirty,
+                                      boolean[] td_bool, boolean[] detect_clean) {
+        System.out.println("\nCSDIRepair");
+        int columnCnt = td_clean[0].length;
+        CSDIRepair detector = new CSDIRepair(td_dirty, td_time, columnCnt);
+        double[][] td_repair = detector.getTd_repaired();
+        boolean[] detect_repair = AnomalyDetector.detect(td_repair, p, beta);
         return new Analysis(td_time, td_clean, td_repair, td_bool, detector.getCost_time(),
                 detect_clean, detect_repair);
     }
@@ -402,14 +445,18 @@ public class Experiment {
         // varyingModelDLinear(5);
         // varyingModelPatchTST(5);
         // varyingForecastContext(5, 2);
-        varyingForecastHorizon(5, 2);
+        // varyingForecastHorizon(5, 2);
         // varyingForecastContextDLinear(5, 2);
         // varyingForecastHorizonDLinear(5, 2);
         // get_arm_repaired(5);
         // get_data_repaired(5);
-        // whole_data_set(4);
-        // main_td_scale();
+        // get_normalized_repaired(5);
+        // get_baseline_repaired(5);
+        get_detection_pr();
+        // get_csdi_repaired(5);
+        // get_domain_noise_arm(5);
         // main_error_rate();
+        // get_prefix_error_arm();
         // main_error_range();
         // main_error_length();
         // main_parameters(false, true, false, false);
@@ -496,7 +543,7 @@ public class Experiment {
 
             // ARM repair: model trained only on conflict-free points in first 80%
             VARUtil varModel = new VARUtil(p);
-            ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 3, varModel, trainLen);
+            ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 3, varModel, trainLen);
             double[][] td_repaired = armRepair.getTd_repaired();
             TimeSeriesPredictor model = armRepair.getPrediction_model(); // same model, no retrain
             writeDataToCSV(td_time_str, td_repaired, file_path + "ARM_VAR_repaired.csv");
@@ -588,7 +635,7 @@ public class Experiment {
 
         // repair once with fixed p
         VARUtil repairModel = new VARUtil(p);
-        ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 3, repairModel, trainLen);
+        ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 3, repairModel, trainLen);
         double[][] td_repaired = armRepair.getTd_repaired();
         writeDataToCSV(td_time_str, td_repaired, file_path + "ARM_VAR_repaired_ctx_exp.csv");
         long repairMs = armRepair.getRepair_time(); 
@@ -681,7 +728,7 @@ public class Experiment {
 
         // ARM repair still p→1
         VARUtil repairModel = new VARUtil(p);
-        ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 3, repairModel, trainLen);
+        ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 3, repairModel, trainLen);
         double[][] td_repaired = armRepair.getTd_repaired();
         writeDataToCSV(td_time_str, td_repaired, file_path + "ARM_VAR_repaired_horizon_exp.csv");
         long repairMs = armRepair.getRepair_time();
@@ -781,7 +828,7 @@ public class Experiment {
 
         DLinearUtil repairModel = new DLinearUtil(p, columnCnt, "./python/dlinear_model.py",
                 "./models/forecast_context_repair_" + dataset, true, 100, 0.001);
-        ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 1, repairModel, trainLen);
+        ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 1, repairModel, trainLen);
         double[][] td_repaired = armRepair.getTd_repaired();
         writeDataToCSV(td_time_str, td_repaired, file_path + "ARM_DLinear_repaired_ctx_exp.csv");
         long repairMs = armRepair.getRepair_time();
@@ -877,7 +924,7 @@ public class Experiment {
 
         DLinearUtil repairModel = new DLinearUtil(p, columnCnt, 1, "./python/dlinear_model.py",
                 "./models/forecast_horizon_repair_" + dataset, true, 100, 0.001);
-        ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 1, repairModel, trainLen);
+        ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 1, repairModel, trainLen);
         double[][] td_repaired = armRepair.getTd_repaired();
         writeDataToCSV(td_time_str, td_repaired, file_path + "ARM_DLinear_repaired_horizon_exp.csv");
         long repairMs = armRepair.getRepair_time();
@@ -927,7 +974,7 @@ public class Experiment {
         System.out.println("Wrote " + timePath);
     }
 
-    /** Conflict-free samples in [0, endExclusive), same rule as ARMDetector training. */
+    /** Conflict-free samples in [0, endExclusive), same rule as ARMRepair training. */
     private static ArrayList<ArrayList<Double>> collectConflictFreeSamples(
             double[][] td, KDTreeUtil kdTree, double eta, int endExclusive) {
         int n = Math.min(td.length, endExclusive);
@@ -1157,9 +1204,9 @@ public class Experiment {
                 // create PatchTST model
                 System.out.println("[Experiment] Creating PatchTST model for dataset: " + datasets[dataset_idx]);
                 PatchTSTUtil patchTSTModel = new PatchTSTUtil(p, columnCnt);
-                // create ARMDetector with PatchTST model
-                System.out.println("[Experiment] Starting ARMDetector repair process...");
-                ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, patchTSTModel);
+                // create ARMRepair with PatchTST model
+                System.out.println("[Experiment] Starting ARMRepair repair process...");
+                ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, patchTSTModel);
                 System.out.println("[Experiment] Repair process completed successfully");
                 
                 double[][] td_repair_mr = armRepair.getTd_repaired();
@@ -1260,7 +1307,7 @@ public class Experiment {
             try {
                 System.out.println("[Experiment] ARM-repair with DLinear; train model on conflict-free points in first 80%...");
                 DLinearUtil dlinearModel = new DLinearUtil(p, columnCnt);
-                ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta, 1, dlinearModel, trainLen);
+                ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta, 1, dlinearModel, trainLen);
                 double[][] td_repaired = armRepair.getTd_repaired();
                 TimeSeriesPredictor model = armRepair.getPrediction_model();
                 writeDataToCSV(td_time_str, td_repaired, file_path + "ARM_DLinear_repaired.csv");
@@ -1384,7 +1431,7 @@ public class Experiment {
         return std;
     }
 
-    /** Same signed normalized delta as ARMDetector.delta */
+    /** Same signed normalized delta as ARMRepair.delta */
     private static double signedDelta(double[] a, double[] b, double[] std) {
         double distance = 0.0;
         for (int i = 0; i < a.length; i++) {
@@ -1496,65 +1543,572 @@ public class Experiment {
 
     /**
      * ARM-only evaluation across datasets for a given error rate.
-     * Writes results/arm_performance/rmse.csv and time.csv.
+     * Runs 2 trials with different seeds; writes mean ± sample std.
      */
     public static void get_arm_repaired(int rate) throws Exception {
         error_rate = rate;
         String data_csv_path = DATA_BASE_PATH + "error_rate_" + String.valueOf(rate) + "/";
         String[] datasets = DATASETS;
-        String[] methods = {"ARM"};
         int nDatasets = datasets.length;
-        double[][] rmseTable = new double[nDatasets][1];
-        long[][] timeTable = new long[nDatasets][1];
+        final int nTrials = 2;
+        final int baseSeed = 665;
 
-        for (int dataset_idx = 0; dataset_idx < nDatasets; dataset_idx++) {
-            String file_path = data_csv_path + datasets[dataset_idx] + "/";
-            File directory = new File(file_path);
-            if (!directory.exists()) {
-                directory.mkdirs();
-            }
-            init(dataset_idx);
-
-            LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, seed);
-            long[] td_time = loadData.getTd_time();
-            double[][] td_clean = loadData.getTd_clean();
-            KDTreeUtil kdTree = loadData.getKdTree();
-            KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
-
-            boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
-
-            AddNoise addNoise = new AddNoise(td_clean, error_rate, error_range, error_length, eta, kdTreeComplete, seed);
-            double[][] td_dirty = addNoise.getTd_dirty();
-
-            LabelData labelData = new LabelData(td_clean, td_dirty, label_rate, seed);
-            boolean[] td_bool = labelData.getTd_bool();
-
-            System.out.println("\n===== ARM-only dataset: " + datasets[dataset_idx] + " =====");
-            int columnCnt = td_clean[0].length;
-            ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta);
-            double[][] td_repair_mr = armRepair.getTd_repaired();
-            long cost_time = armRepair.getCost_time();
-            boolean[] detect_repair = AnomalyDetector.detect(td_repair_mr, p, beta);
-            Analysis analysis = new Analysis(td_time, td_clean, td_repair_mr, td_bool, cost_time, detect_clean, detect_repair);
-            rmseTable[dataset_idx][0] = analysis.getRMSEValue();
-            timeTable[dataset_idx][0] = analysis.getCost_time();
-
-            System.out.println("  RMSE: " + analysis.getRMSE());
-            System.out.println("  Time: " + analysis.getCost_time() + " ms");
-            System.out.println("  Rounds: " + armRepair.getActual_rounds() + "/" + armRepair.getT());
-
-            System.gc();
-            Runtime.getRuntime().gc();
-        }
-
-        File resultsDir = new File("./results/arm_performance");
+        File resultsDir = new File("./results/arm_performance_v2");
         if (!resultsDir.exists()) {
             resultsDir.mkdirs();
         }
-        String rmseCsv = "./results/arm_performance/rmse.csv";
-        String timeCsv = "./results/arm_performance/time.csv";
-        writeCompareCsv(rmseCsv, datasets, methods, rmseTable, null);
-        writeCompareCsv(timeCsv, datasets, methods, null, timeTable);
+        String rmseCsv = "./results/arm_performance_v2/rmse.csv";
+        String timeCsv = "./results/arm_performance_v2/time.csv";
+
+        try (BufferedWriter rmseOut = new BufferedWriter(new FileWriter(rmseCsv));
+             BufferedWriter timeOut = new BufferedWriter(new FileWriter(timeCsv))) {
+            rmseOut.write("dataset,ARM");
+            rmseOut.newLine();
+            timeOut.write("dataset,ARM");
+            timeOut.newLine();
+
+            System.out.println("\n===== ARM-only, " + nTrials + " trials (mean ± std) =====");
+            for (int dataset_idx = 0; dataset_idx < nDatasets; dataset_idx++) {
+                String file_path = data_csv_path + datasets[dataset_idx] + "/";
+                File directory = new File(file_path);
+                if (!directory.exists()) {
+                    directory.mkdirs();
+                }
+                init(dataset_idx);
+
+                LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, baseSeed);
+                long[] td_time = loadData.getTd_time();
+                double[][] td_clean = loadData.getTd_clean();
+                KDTreeUtil kdTree = loadData.getKdTree();
+                KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+                boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+                int columnCnt = td_clean[0].length;
+
+                double[] rmses = new double[nTrials];
+                double[] times = new double[nTrials];
+                System.out.println("\n===== ARM-only dataset: " + datasets[dataset_idx] + " =====");
+                for (int t = 0; t < nTrials; t++) {
+                    seed = baseSeed + t;
+                    double[][] td_dirty = new AddNoise(td_clean, error_rate, error_range, error_length,
+                            eta, kdTreeComplete, seed).getTd_dirty();
+                    LabelData labelData = new LabelData(td_clean, td_dirty, label_rate, seed);
+                    ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta,
+                            3, new VARUtil(p));
+                    double[][] td_repair_mr = armRepair.getTd_repaired();
+                    boolean[] detect_repair = AnomalyDetector.detect(td_repair_mr, p, beta);
+                    Analysis analysis = new Analysis(td_time, td_clean, td_repair_mr, labelData.getTd_bool(),
+                            armRepair.getCost_time(), detect_clean, detect_repair);
+                    rmses[t] = analysis.getRMSEValue();
+                    times[t] = analysis.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials
+                            + " seed=" + seed
+                            + " RMSE=" + String.format("%.6f", rmses[t])
+                            + " Time=" + (long) times[t] + " ms"
+                            + " Rounds=" + armRepair.getActual_rounds() + "/" + armRepair.getT());
+                    System.gc();
+                    Runtime.getRuntime().gc();
+                }
+                String rmseCell = formatMeanStd(rmses);
+                String timeCell = formatMeanStd(times);
+                rmseOut.write(datasets[dataset_idx] + "," + rmseCell);
+                rmseOut.newLine();
+                timeOut.write(datasets[dataset_idx] + "," + timeCell);
+                timeOut.newLine();
+                System.out.println("  RMSE: " + rmseCell);
+                System.out.println("  Time (ms): " + timeCell);
+            }
+        }
+        System.out.println("Wrote RMSE CSV: " + rmseCsv);
+        System.out.println("Wrote Time CSV: " + timeCsv);
+    }
+
+    /**
+     * DomainNN + ModelOnly only, same trial protocol as {@link #get_arm_repaired}.
+     */
+    public static void get_baseline_repaired(int rate) throws Exception {
+        error_rate = rate;
+        String[] datasets = DATASETS;
+        String[] methods = {"DomainNN", "ModelOnly"};
+        int nDatasets = datasets.length;
+        final int nTrials = 2;
+        final int baseSeed = 665;
+
+        File resultsDir = new File("./results/baseline_performance");
+        if (!resultsDir.exists()) {
+            resultsDir.mkdirs();
+        }
+        String rmseCsv = "./results/baseline_performance/rmse.csv";
+        String timeCsv = "./results/baseline_performance/time.csv";
+
+        try (BufferedWriter rmseOut = new BufferedWriter(new FileWriter(rmseCsv));
+             BufferedWriter timeOut = new BufferedWriter(new FileWriter(timeCsv))) {
+            rmseOut.write("dataset,DomainNN,ModelOnly");
+            rmseOut.newLine();
+            timeOut.write("dataset,DomainNN,ModelOnly");
+            timeOut.newLine();
+
+            System.out.println("\n===== DomainNN + ModelOnly, " + nTrials + " trials (mean ± std) =====");
+            for (int dataset_idx = 0; dataset_idx < nDatasets; dataset_idx++) {
+                init(dataset_idx);
+                LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, baseSeed);
+                long[] td_time = loadData.getTd_time();
+                double[][] td_clean = loadData.getTd_clean();
+                KDTreeUtil kdTree = loadData.getKdTree();
+                KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+                boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+
+                System.out.println("\n===== baselines dataset: " + datasets[dataset_idx] + " =====");
+                double[][] rmses = new double[methods.length][nTrials];
+                double[][] times = new double[methods.length][nTrials];
+
+                for (int t = 0; t < nTrials; t++) {
+                    seed = baseSeed + t;
+                    double[][] td_dirty = new AddNoise(td_clean, error_rate, error_range, error_length,
+                            eta, kdTreeComplete, seed).getTd_dirty();
+                    boolean[] td_bool = new LabelData(td_clean, td_dirty, label_rate, seed).getTd_bool();
+
+                    Analysis domain = domainNnRepair(kdTree, td_time, td_clean, td_dirty, td_bool, detect_clean);
+                    rmses[0][t] = domain.getRMSEValue();
+                    times[0][t] = domain.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials + " DomainNN"
+                            + " seed=" + seed
+                            + " RMSE=" + String.format("%.6f", rmses[0][t])
+                            + " Time=" + (long) times[0][t] + " ms");
+                    gcQuiet();
+
+                    Analysis model = modelOnlyRepair(td_time, td_clean, td_dirty, td_bool, detect_clean);
+                    rmses[1][t] = model.getRMSEValue();
+                    times[1][t] = model.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials + " ModelOnly"
+                            + " seed=" + seed
+                            + " RMSE=" + String.format("%.6f", rmses[1][t])
+                            + " Time=" + (long) times[1][t] + " ms");
+                    gcQuiet();
+                }
+
+                StringBuilder rmseLine = new StringBuilder(datasets[dataset_idx]);
+                StringBuilder timeLine = new StringBuilder(datasets[dataset_idx]);
+                for (int m = 0; m < methods.length; m++) {
+                    String rmseCell = formatMeanStd(rmses[m]);
+                    String timeCell = formatMeanStd(times[m]);
+                    rmseLine.append(',').append(rmseCell);
+                    timeLine.append(',').append(timeCell);
+                    System.out.println("  " + methods[m] + " RMSE: " + rmseCell);
+                    System.out.println("  " + methods[m] + " Time (ms): " + timeCell);
+                }
+                rmseOut.write(rmseLine.toString());
+                rmseOut.newLine();
+                rmseOut.flush();
+                timeOut.write(timeLine.toString());
+                timeOut.newLine();
+                timeOut.flush();
+            }
+        }
+        System.out.println("Wrote RMSE CSV: " + rmseCsv);
+        System.out.println("Wrote Time CSV: " + timeCsv);
+    }
+
+    /**
+     * ARM vs CSDI on the same prefix of each dataset. CSDI self-detects then
+     * imputes; it does not receive ARM's error set E.
+     */
+    public static void get_csdi_repaired(int rate) throws Exception {
+        error_rate = rate;
+        String[] datasets = DATASETS;
+        String[] methods = {"ARM", "CSDI"};
+        int nDatasets = datasets.length;
+        final int nTrials = 1;
+        final int baseSeed = 665;
+
+        File resultsDir = new File("./results/csdi_performance");
+        if (!resultsDir.exists()) {
+            resultsDir.mkdirs();
+        }
+        String rmseCsv = "./results/csdi_performance/rmse.csv";
+        String timeCsv = "./results/csdi_performance/time.csv";
+
+        try (BufferedWriter rmseOut = new BufferedWriter(new FileWriter(rmseCsv));
+             BufferedWriter timeOut = new BufferedWriter(new FileWriter(timeCsv))) {
+            rmseOut.write("dataset,ARM,CSDI");
+            rmseOut.newLine();
+            timeOut.write("dataset,ARM,CSDI");
+            timeOut.newLine();
+
+            System.out.println("\n===== ARM vs CSDI (self-detect then impute), prefix="
+                    + CSDI_COMPARE_LEN + " =====");
+            for (int dataset_idx = 0; dataset_idx < nDatasets; dataset_idx++) {
+                init(dataset_idx);
+                LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, baseSeed);
+                long[] td_time_full = loadData.getTd_time();
+                double[][] td_clean_full = loadData.getTd_clean();
+                KDTreeUtil kdTree = loadData.getKdTree();
+                KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+
+                int n = Math.min(CSDI_COMPARE_LEN, td_clean_full.length);
+                long[] td_time = Arrays.copyOf(td_time_full, n);
+                double[][] td_clean = sliceRows(td_clean_full, 0, n);
+                boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+
+                System.out.println("\n===== CSDI dataset: " + datasets[dataset_idx]
+                        + " n=" + n + " =====");
+                double[][] rmses = new double[methods.length][nTrials];
+                double[][] times = new double[methods.length][nTrials];
+
+                for (int t = 0; t < nTrials; t++) {
+                    seed = baseSeed + t;
+                    double[][] td_dirty_full = new AddNoise(td_clean_full, error_rate, error_range,
+                            error_length, eta, kdTreeComplete, seed).getTd_dirty();
+                    boolean[] td_bool = new LabelData(td_clean, sliceRows(td_dirty_full, 0, n),
+                            label_rate, seed).getTd_bool();
+
+                    Analysis arm = armRepair(kdTree, td_time, td_clean,
+                            sliceRows(td_dirty_full, 0, n), td_bool, detect_clean);
+                    rmses[0][t] = arm.getRMSEValue();
+                    times[0][t] = arm.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials + " ARM"
+                            + " RMSE=" + String.format("%.6f", rmses[0][t])
+                            + " Time=" + (long) times[0][t] + " ms");
+                    gcQuiet();
+
+                    Analysis csdi = csdiRepair(td_time, td_clean,
+                            sliceRows(td_dirty_full, 0, n), td_bool, detect_clean);
+                    rmses[1][t] = csdi.getRMSEValue();
+                    times[1][t] = csdi.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials + " CSDI"
+                            + " RMSE=" + String.format("%.6f", rmses[1][t])
+                            + " Time=" + (long) times[1][t] + " ms");
+                    gcQuiet();
+                }
+
+                StringBuilder rmseLine = new StringBuilder(datasets[dataset_idx]);
+                StringBuilder timeLine = new StringBuilder(datasets[dataset_idx]);
+                for (int m = 0; m < methods.length; m++) {
+                    String rmseCell = formatMeanStd(rmses[m]);
+                    String timeCell = formatMeanStd(times[m]);
+                    rmseLine.append(',').append(rmseCell);
+                    timeLine.append(',').append(timeCell);
+                    System.out.println("  " + methods[m] + " RMSE: " + rmseCell);
+                    System.out.println("  " + methods[m] + " Time (ms): " + timeCell);
+                }
+                rmseOut.write(rmseLine.toString());
+                rmseOut.newLine();
+                rmseOut.flush();
+                timeOut.write(timeLine.toString());
+                timeOut.newLine();
+                timeOut.flush();
+            }
+        }
+        System.out.println("Wrote RMSE CSV: " + rmseCsv);
+        System.out.println("Wrote Time CSV: " + timeCsv);
+    }
+
+    /**
+     * Precision / recall of ARM's two initial detectors vs injected errors
+     * (row dirty ≠ clean). No repair, no other baselines.
+     */
+    public static void get_detection_pr() throws Exception {
+        String[] datasets = DATASETS;
+        File resultsDir = new File("./results/detection_pr");
+        if (!resultsDir.exists()) {
+            resultsDir.mkdirs();
+        }
+        String csv = "./results/detection_pr/pr.csv";
+
+        try (BufferedWriter out = new BufferedWriter(new FileWriter(csv))) {
+            out.write("dataset,n,n_true,e_domain_size,e_domain_precision,e_domain_recall,"
+                    + "e_model_size,e_model_precision,e_model_recall");
+            out.newLine();
+
+            System.out.println("\n===== E_domain / E_model precision & recall =====");
+            for (int dataset_idx = 0; dataset_idx < datasets.length; dataset_idx++) {
+                init(dataset_idx);
+                LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, seed);
+                double[][] td_clean = loadData.getTd_clean();
+                KDTreeUtil kdTree = loadData.getKdTree();
+                KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+                long[] td_time = loadData.getTd_time();
+                int columnCnt = td_clean[0].length;
+
+                double[][] td_dirty = new AddNoise(td_clean, error_rate, error_range, error_length,
+                        eta, kdTreeComplete, seed).getTd_dirty();
+                boolean[] gold = trueErrorMask(td_clean, td_dirty);
+
+                ARMRepair detector = ARMRepair.forDetection(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta);
+                boolean[] eDomain = detector.getE_domain();
+                boolean[] eModel = detector.getE_model();
+
+                double[] domainPr = precisionRecall(eDomain, gold);
+                double[] modelPr = precisionRecall(eModel, gold);
+                int nTrue = countTrue(gold);
+                int nDom = countTrue(eDomain);
+                int nMod = countTrue(eModel);
+
+                System.out.println("\n----- " + datasets[dataset_idx]
+                        + " n=" + td_clean.length
+                        + " n_true=" + nTrue + " -----");
+                System.out.println("  E_domain |E|=" + nDom
+                        + " P=" + String.format("%.6f", domainPr[0])
+                        + " R=" + String.format("%.6f", domainPr[1])
+                        + " tp/fp/fn=" + (int) domainPr[2] + "/" + (int) domainPr[3] + "/" + (int) domainPr[4]);
+                System.out.println("  E_model  |E|=" + nMod
+                        + " P=" + String.format("%.6f", modelPr[0])
+                        + " R=" + String.format("%.6f", modelPr[1])
+                        + " tp/fp/fn=" + (int) modelPr[2] + "/" + (int) modelPr[3] + "/" + (int) modelPr[4]);
+
+                out.write(datasets[dataset_idx]
+                        + "," + td_clean.length
+                        + "," + nTrue
+                        + "," + nDom
+                        + "," + String.format("%.6f", domainPr[0])
+                        + "," + String.format("%.6f", domainPr[1])
+                        + "," + nMod
+                        + "," + String.format("%.6f", modelPr[0])
+                        + "," + String.format("%.6f", modelPr[1]));
+                out.newLine();
+                out.flush();
+                gcQuiet();
+            }
+        }
+        System.out.println("Wrote P/R CSV: " + csv);
+    }
+
+    /** Ground truth: a timestep is an error if any variable differs from clean. */
+    static boolean[] trueErrorMask(double[][] clean, double[][] dirty) {
+        boolean[] gold = new boolean[clean.length];
+        for (int i = 0; i < clean.length; i++) {
+            for (int c = 0; c < clean[i].length; c++) {
+                if (clean[i][c] != dirty[i][c]) {
+                    gold[i] = true;
+                    break;
+                }
+            }
+        }
+        return gold;
+    }
+
+    /**
+     * @return {precision, recall, tp, fp, fn}; precision/recall are 0 when the
+     *         denominator is 0 (no Laplace smoothing).
+     */
+    static double[] precisionRecall(boolean[] pred, boolean[] gold) {
+        int tp = 0, fp = 0, fn = 0;
+        for (int i = 0; i < gold.length; i++) {
+            if (pred[i] && gold[i]) {
+                tp++;
+            } else if (pred[i]) {
+                fp++;
+            } else if (gold[i]) {
+                fn++;
+            }
+        }
+        double precision = (tp + fp) == 0 ? 0.0 : tp / (double) (tp + fp);
+        double recall = (tp + fn) == 0 ? 0.0 : tp / (double) (tp + fn);
+        return new double[]{precision, recall, tp, fp, fn};
+    }
+
+    static int countTrue(boolean[] flags) {
+        int n = 0;
+        for (boolean f : flags) {
+            if (f) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Inject Gaussian noise into a fraction of domain-constraint rows, rebuild the
+     * ARM k-NN index, then repair. Road dataset + ARM only.
+     * Percents: 20, 40, 60, 80, 100. Time-series dirt is injected against the
+     * original (clean) domain so only constraint quality varies.
+     */
+    public static void get_domain_noise_arm(int rate) throws Exception {
+        error_rate = rate;
+        final int dataset_idx = 2; // road
+        final int nTrials = 2;
+        final int baseSeed = 665;
+        int[] percents = {20, 40, 60, 80, 100};
+
+        init(dataset_idx);
+        LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, baseSeed);
+        long[] td_time = loadData.getTd_time();
+        double[][] td_clean = loadData.getTd_clean();
+        double[][] mdClean = sliceRows(loadData.getMd(), 0, loadData.getMd().length);
+        KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+        boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+        int columnCnt = td_clean[0].length;
+
+        File resultsDir = new File("./results/domain_noise/road");
+        if (!resultsDir.exists()) {
+            resultsDir.mkdirs();
+        }
+        String rmseCsv = "./results/domain_noise/road/rmse.csv";
+        String timeCsv = "./results/domain_noise/road/time.csv";
+
+        System.out.println("\n===== Domain-noise ARM, road, " + nTrials + " trials =====");
+        System.out.println("series error_rate=" + error_rate + ", error_range=" + error_range
+                + ", md_len=" + mdClean.length);
+
+        try (BufferedWriter rmseOut = new BufferedWriter(new FileWriter(rmseCsv));
+             BufferedWriter timeOut = new BufferedWriter(new FileWriter(timeCsv))) {
+            rmseOut.write("domain_noise_pct,rmse");
+            rmseOut.newLine();
+            timeOut.write("domain_noise_pct,time_ms");
+            timeOut.newLine();
+
+            for (int pct : percents) {
+                double[] rmses = new double[nTrials];
+                double[] times = new double[nTrials];
+                System.out.println("\n----- domain noise " + pct + "% -----");
+                for (int t = 0; t < nTrials; t++) {
+                    seed = baseSeed + t;
+                    double[][] td_dirty = new AddNoise(td_clean, error_rate, error_range, error_length,
+                            eta, kdTreeComplete, seed).getTd_dirty();
+                    boolean[] td_bool = new LabelData(td_clean, td_dirty, label_rate, seed).getTd_bool();
+
+                    double[][] mdNoisy = corruptDomainConstraints(mdClean, pct, error_range, seed);
+                    KDTreeUtil kdNoisy = new KDTreeUtil(sliceRows(mdNoisy, 0, mdNoisy.length));
+
+                    ARMRepair armRepair = new ARMRepair(td_dirty, kdNoisy, td_time, columnCnt, k, p, eta, beta,
+                            3, new VARUtil(p));
+                    Analysis analysis = new Analysis(td_time, td_clean, armRepair.getTd_repaired(),
+                            td_bool, armRepair.getCost_time(), detect_clean,
+                            AnomalyDetector.detect(armRepair.getTd_repaired(), p, beta));
+                    rmses[t] = analysis.getRMSEValue();
+                    times[t] = analysis.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials + " seed=" + seed
+                            + " RMSE=" + String.format("%.6f", rmses[t])
+                            + " Time=" + (long) times[t] + " ms"
+                            + " Rounds=" + armRepair.getActual_rounds() + "/" + armRepair.getT());
+                    gcQuiet();
+                }
+                String rmseCell = formatMeanStd(rmses);
+                String timeCell = formatMeanStd(times);
+                rmseOut.write(pct + "," + rmseCell);
+                rmseOut.newLine();
+                rmseOut.flush();
+                timeOut.write(pct + "," + timeCell);
+                timeOut.newLine();
+                timeOut.flush();
+                System.out.println("  ARM RMSE: " + rmseCell);
+                System.out.println("  ARM Time (ms): " + timeCell);
+            }
+        }
+        System.out.println("Wrote RMSE CSV: " + rmseCsv);
+        System.out.println("Wrote Time CSV: " + timeCsv);
+    }
+
+    /**
+     * Corrupt {@code percent}% of domain-constraint rows with N(0,1)*range (same
+     * magnitude as series error_range). Returns a new array; input is not modified.
+     */
+    private static double[][] corruptDomainConstraints(double[][] md, int percent, double range, int seed) {
+        double[][] noisy = sliceRows(md, 0, md.length);
+        if (percent <= 0) {
+            return noisy;
+        }
+        int n = noisy.length;
+        int nCorrupt = (int) Math.round(n * Math.min(percent, 100) / 100.0);
+        Random rng = new Random(seed + 17 * percent);
+        int[] idx = new int[n];
+        for (int i = 0; i < n; i++) {
+            idx[i] = i;
+        }
+        for (int i = 0; i < nCorrupt; i++) {
+            int j = i + rng.nextInt(n - i);
+            int tmp = idx[i];
+            idx[i] = idx[j];
+            idx[j] = tmp;
+        }
+        int cols = noisy[0].length;
+        for (int i = 0; i < nCorrupt; i++) {
+            double g = rng.nextGaussian();
+            int row = idx[i];
+            for (int c = 0; c < cols; c++) {
+                noisy[row][c] += g * range;
+            }
+        }
+        System.out.println("  corrupted " + nCorrupt + " / " + n + " domain rows (" + percent + "%)");
+        return noisy;
+    }
+
+    private static String formatMeanStd(double[] values) {
+        double mean = 0.0;
+        for (double v : values) {
+            mean += v;
+        }
+        mean /= values.length;
+        double var = 0.0;
+        for (double v : values) {
+            double d = v - mean;
+            var += d * d;
+        }
+        double std = values.length > 1 ? Math.sqrt(var / (values.length - 1)) : 0.0;
+        return String.format("%.6f ± %.6f", mean, std);
+    }
+
+    /**
+     * Inject a contiguous error burst of given length at the start of the road
+     * series, then overlay {@link AddNoise} (init error_rate, per-mille). ARM only.
+     * Lengths: 5, 10, 15, 20, 25.
+     */
+    public static void get_prefix_error_arm() throws Exception {
+        final int dataset_idx = 2; // road
+        int[] lengths = {5, 10, 15, 20, 25};
+        init(dataset_idx);
+
+        LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, seed);
+        long[] td_time = loadData.getTd_time();
+        double[][] td_clean = loadData.getTd_clean();
+        KDTreeUtil kdTree = loadData.getKdTree();
+        KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+        boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+        int columnCnt = td_clean[0].length;
+        boolean[] td_bool = new boolean[td_clean.length];
+
+        File resultsDir = new File("./results/prefix_error/road");
+        if (!resultsDir.exists()) {
+            resultsDir.mkdirs();
+        }
+        String rmseCsv = "./results/prefix_error/road/rmse.csv";
+        String timeCsv = "./results/prefix_error/road/time.csv";
+
+        System.out.println("\n===== Prefix-burst ARM, road =====");
+        System.out.println("error_range=" + error_range + ", eta=" + eta + ", p=" + p
+                + ", addNoise per-mille=" + error_rate
+                + ", lengths=" + Arrays.toString(lengths));
+
+        try (BufferedWriter rmseOut = new BufferedWriter(new FileWriter(rmseCsv));
+             BufferedWriter timeOut = new BufferedWriter(new FileWriter(timeCsv))) {
+            rmseOut.write("error_length,rmse");
+            rmseOut.newLine();
+            timeOut.write("error_length,time_ms");
+            timeOut.newLine();
+
+            for (int len : lengths) {
+                double[][] td_prefix = AddNoise.prefixBurst(td_clean, len, error_range, eta, kdTreeComplete, seed);
+                double[][] td_dirty = new AddNoise(td_prefix, error_rate, error_range, error_length,
+                        eta, kdTreeComplete, seed).getTd_dirty();
+                ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta,
+                        3, new VARUtil(p));
+                Analysis analysis = new Analysis(td_time, td_clean, armRepair.getTd_repaired(),
+                        td_bool, armRepair.getCost_time(), detect_clean,
+                        AnomalyDetector.detect(armRepair.getTd_repaired(), p, beta));
+                String rmse = String.format("%.6f", analysis.getRMSEValue());
+                long timeMs = analysis.getCost_time();
+                rmseOut.write(len + "," + rmse);
+                rmseOut.newLine();
+                rmseOut.flush();
+                timeOut.write(len + "," + timeMs);
+                timeOut.newLine();
+                timeOut.flush();
+                System.out.println("  prefix length=" + len
+                        + " RMSE=" + rmse
+                        + " Time=" + timeMs + " ms"
+                        + " Rounds=" + armRepair.getActual_rounds() + "/" + armRepair.getT());
+                gcQuiet();
+            }
+        }
         System.out.println("Wrote RMSE CSV: " + rmseCsv);
         System.out.println("Wrote Time CSV: " + timeCsv);
     }
@@ -1563,7 +2117,7 @@ public class Experiment {
         error_rate = rate;
         String data_csv_path = DATA_BASE_PATH + "error_rate_" + String.valueOf(rate) + "/";
         String[] datasets = DATASETS;
-        String[] methods = {"ARM", "ER", "SCREEN", "Lsgreedy", "IMR", "MTCSC"};
+        String[] methods = {"ARM", "DomainNN", "ModelOnly", "ER", "SCREEN", "Lsgreedy", "IMR", "MTCSC"};
         int nDatasets = datasets.length;
         int nMethods = methods.length;
         double[][] rmseTable = new double[nDatasets][nMethods];
@@ -1604,7 +2158,7 @@ public class Experiment {
 
             System.out.println("\nARMRepair");
             int columnCnt = td_clean[0].length;
-            ARMDetector armRepair = new ARMDetector(td_dirty, kdTree, td_time, columnCnt, k, p, eta);
+            ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta);
             double[][] td_repair_mr = armRepair.getTd_repaired();
 //            writeDataToCSV(td_repair_mr, file_path + "MR.csv");
             long cost_time = armRepair.getCost_time();
@@ -1612,10 +2166,18 @@ public class Experiment {
             Analysis analysis = new Analysis(td_time, td_clean, td_repair_mr, td_bool, cost_time, detect_clean, detect_repair);
             rmseTable[dataset_idx][0] = analysis.getRMSEValue();
             timeTable[dataset_idx][0] = analysis.getCost_time();
-//            recordFile(analysis.getRMSE() + ",", "RMSE");
-//            recordFile(analysis.getPrecision() + ",", "Precision");
-//            recordFile(analysis.getRecall() + ",", "Recall");
-//            recordFile(analysis.getCost_time() + ",", "Time");
+            System.gc();
+            Runtime.getRuntime().gc();
+
+            analysis = domainNnRepair(kdTree, td_time, td_clean, td_dirty, td_bool, detect_clean);
+            rmseTable[dataset_idx][1] = analysis.getRMSEValue();
+            timeTable[dataset_idx][1] = analysis.getCost_time();
+            System.gc();
+            Runtime.getRuntime().gc();
+
+            analysis = modelOnlyRepair(td_time, td_clean, td_dirty, td_bool, detect_clean);
+            rmseTable[dataset_idx][2] = analysis.getRMSEValue();
+            timeTable[dataset_idx][2] = analysis.getCost_time();
             System.gc();
             Runtime.getRuntime().gc();
 
@@ -1626,8 +2188,8 @@ public class Experiment {
             cost_time = editingRuleRepair.getCost_time();
             detect_repair = AnomalyDetector.detect(td_repair_er, p, beta);
             analysis = new Analysis(td_time, td_clean, td_repair_er, td_bool, cost_time, detect_clean, detect_repair);
-            rmseTable[dataset_idx][1] = analysis.getRMSEValue();
-            timeTable[dataset_idx][1] = analysis.getCost_time();
+            rmseTable[dataset_idx][3] = analysis.getRMSEValue();
+            timeTable[dataset_idx][3] = analysis.getCost_time();
 //            recordFile(analysis.getRMSE() + ",", "RMSE");
 //            recordFile(analysis.getPrecision() + ",", "Precision");
 //            recordFile(analysis.getRecall() + ",", "Recall");
@@ -1642,8 +2204,8 @@ public class Experiment {
             cost_time = screen.getCost_time();
             detect_repair = AnomalyDetector.detect(td_repair_sr, p, beta);
             analysis = new Analysis(td_time, td_clean, td_repair_sr, td_bool, cost_time, detect_clean, detect_repair);
-            rmseTable[dataset_idx][2] = analysis.getRMSEValue();
-            timeTable[dataset_idx][2] = analysis.getCost_time();
+            rmseTable[dataset_idx][4] = analysis.getRMSEValue();
+            timeTable[dataset_idx][4] = analysis.getCost_time();
 //            recordFile(analysis.getRMSE() + ",", "RMSE");
 //            recordFile(analysis.getPrecision() + ",", "Precision");
 //            recordFile(analysis.getRecall() + ",", "Recall");
@@ -1658,8 +2220,8 @@ public class Experiment {
             cost_time = lsgreedy.getCost_time();
             detect_repair = AnomalyDetector.detect(td_repair_lg, p, beta);
             analysis = new Analysis(td_time, td_clean, td_repair_lg, td_bool, cost_time, detect_clean, detect_repair);
-            rmseTable[dataset_idx][3] = analysis.getRMSEValue();
-            timeTable[dataset_idx][3] = analysis.getCost_time();
+            rmseTable[dataset_idx][5] = analysis.getRMSEValue();
+            timeTable[dataset_idx][5] = analysis.getCost_time();
 //            recordFile(analysis.getRMSE() + ",", "RMSE");
 //            recordFile(analysis.getPrecision() + ",", "Precision");
 //            recordFile(analysis.getRecall() + ",", "Recall");
@@ -1674,8 +2236,8 @@ public class Experiment {
             cost_time = imr.getCost_time();
             detect_repair = AnomalyDetector.detect(td_repair_imr, p, beta);
             analysis = new Analysis(td_time, td_clean, td_repair_imr, td_bool, cost_time, detect_clean, detect_repair);
-            rmseTable[dataset_idx][4] = analysis.getRMSEValue();
-            timeTable[dataset_idx][4] = analysis.getCost_time();
+            rmseTable[dataset_idx][6] = analysis.getRMSEValue();
+            timeTable[dataset_idx][6] = analysis.getCost_time();
 //            recordFile(analysis.getRMSE() + ",", "RMSE");
 //            recordFile(analysis.getPrecision() + ",", "Precision");
 //            recordFile(analysis.getRecall() + ",", "Recall");
@@ -1695,8 +2257,8 @@ public class Experiment {
             cost_time = mtcsc.getCost_time();
             detect_repair = AnomalyDetector.detect(td_repair_mtcsc, p, beta);
             analysis = new Analysis(td_time, td_clean, td_repair_mtcsc, td_bool, cost_time, detect_clean, detect_repair);
-            rmseTable[dataset_idx][5] = analysis.getRMSEValue();
-            timeTable[dataset_idx][5] = analysis.getCost_time();
+            rmseTable[dataset_idx][7] = analysis.getRMSEValue();
+            timeTable[dataset_idx][7] = analysis.getCost_time();
 //            recordFile(analysis.getRMSE() + ",", "RMSE");
 //            recordFile(analysis.getPrecision() + ",", "Precision");
 //            recordFile(analysis.getRecall() + ",", "Recall");
@@ -1713,6 +2275,93 @@ public class Experiment {
         String timeCsv = "./results/whole_performance/time.csv";
         writeCompareCsv(rmseCsv, datasets, methods, rmseTable, null);
         writeCompareCsv(timeCsv, datasets, methods, null, timeTable);
+        System.out.println("Wrote RMSE CSV: " + rmseCsv);
+        System.out.println("Wrote Time CSV: " + timeCsv);
+    }
+
+    /**
+     * Same methods as {@link #get_data_repaired}, but z-score clean/dirty/domain
+     * with clean-series mean/std after noise injection. Two trials, mean ± std.
+     * ARM-only evaluation on z-scored series (clean/dirty/domain share clean μ,σ).
+     * Two trials, mean ± std. RMSE is in normalized space.
+     */
+    public static void get_normalized_repaired(int rate) throws Exception {
+        error_rate = rate;
+        String[] datasets = DATASETS;
+        String[] methods = {"ARM"};
+        int nDatasets = datasets.length;
+        final int nTrials = 2;
+        final int baseSeed = 665;
+
+        String[][] rmseCells = new String[nDatasets][1];
+        String[][] timeCells = new String[nDatasets][1];
+
+        File resultsDir = new File("./results/normalized_performance");
+        if (!resultsDir.exists()) {
+            resultsDir.mkdirs();
+        }
+        String rmseCsv = "./results/normalized_performance/rmse.csv";
+        String timeCsv = "./results/normalized_performance/time.csv";
+
+        try (BufferedWriter rmseOut = new BufferedWriter(new FileWriter(rmseCsv));
+             BufferedWriter timeOut = new BufferedWriter(new FileWriter(timeCsv))) {
+            rmseOut.write("dataset,ARM");
+            rmseOut.newLine();
+            timeOut.write("dataset,ARM");
+            timeOut.newLine();
+
+            System.out.println("\n===== Normalized ARM-only, " + nTrials + " trials (mean ± std) =====");
+            for (int dataset_idx = 0; dataset_idx < nDatasets; dataset_idx++) {
+                init(dataset_idx);
+                seed = baseSeed;
+                LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, seed);
+                long[] td_time = loadData.getTd_time();
+                double[][] origClean = sliceRows(loadData.getTd_clean(), 0, loadData.getTd_clean().length);
+                KDTreeUtil kdTreeCompleteOrig = loadData.getKdTreeComplete();
+                loadData.zscoreFromCleanSeries();
+                double[][] td_clean = loadData.getTd_clean();
+                KDTreeUtil kdTree = loadData.getKdTree();
+                boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+                int columnCnt = td_clean[0].length;
+
+                System.out.println("\n===== dataset: " + datasets[dataset_idx] + " (z-scored) =====");
+                System.out.println("  mu=" + Arrays.toString(loadData.getMean())
+                        + "  sigma=" + Arrays.toString(loadData.getStd()));
+
+                double[] rmses = new double[nTrials];
+                double[] times = new double[nTrials];
+                for (int t = 0; t < nTrials; t++) {
+                    seed = baseSeed + t;
+                    double[][] td_dirty = new AddNoise(origClean, error_rate, error_range, error_length,
+                            eta, kdTreeCompleteOrig, seed).getTd_dirty();
+                    loadData.applyZscore(td_dirty);
+                    LabelData labelData = new LabelData(td_clean, td_dirty, label_rate, seed);
+                    ARMRepair armRepair = new ARMRepair(td_dirty, kdTree, td_time, columnCnt, k, p, eta, beta,
+                            1, new VARUtil(p));
+                    Analysis analysis = new Analysis(td_time, td_clean, armRepair.getTd_repaired(),
+                            labelData.getTd_bool(), armRepair.getCost_time(), detect_clean,
+                            AnomalyDetector.detect(armRepair.getTd_repaired(), p, beta));
+                    rmses[t] = analysis.getRMSEValue();
+                    times[t] = analysis.getCost_time();
+                    System.out.println("  trial " + (t + 1) + "/" + nTrials
+                            + " seed=" + seed
+                            + " RMSE=" + String.format("%.6f", rmses[t])
+                            + " Time=" + (long) times[t] + " ms"
+                            + " Rounds=" + armRepair.getActual_rounds() + "/" + armRepair.getT());
+                    gcQuiet();
+                }
+                rmseCells[dataset_idx][0] = formatMeanStd(rmses);
+                timeCells[dataset_idx][0] = formatMeanStd(times);
+                rmseOut.write(datasets[dataset_idx] + "," + rmseCells[dataset_idx][0]);
+                rmseOut.newLine();
+                timeOut.write(datasets[dataset_idx] + "," + timeCells[dataset_idx][0]);
+                timeOut.newLine();
+                rmseOut.flush();
+                timeOut.flush();
+                System.out.println("  RMSE: " + rmseCells[dataset_idx][0]);
+                System.out.println("  Time (ms): " + timeCells[dataset_idx][0]);
+            }
+        }
         System.out.println("Wrote RMSE CSV: " + rmseCsv);
         System.out.println("Wrote Time CSV: " + timeCsv);
     }
@@ -1739,6 +2388,26 @@ public class Experiment {
                     } else {
                         bw.write(Long.toString(timeTable[i][j]));
                     }
+                }
+                bw.newLine();
+            }
+        }
+    }
+
+    private static void writeCellCsv(String path, String[] datasets, String[] methods,
+                                     String[][] cells) throws IOException {
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(path))) {
+            bw.write("dataset");
+            for (String method : methods) {
+                bw.write(",");
+                bw.write(method);
+            }
+            bw.newLine();
+            for (int i = 0; i < datasets.length; i++) {
+                bw.write(datasets[i]);
+                for (int j = 0; j < methods.length; j++) {
+                    bw.write(",");
+                    bw.write(cells[i][j]);
                 }
                 bw.newLine();
             }
@@ -1821,92 +2490,80 @@ public class Experiment {
 
     public static void main_error_rate() throws Exception {
         System.out.println("--------------------");
-        System.out.println("main error rate");
+        System.out.println("main error rate (road)");
         System.out.println("--------------------");
-        int error_rate_base, error_rate_step;
-        String record;
-        String[] datasetNames = DATASETS;
-        String[] methods = {"ARM", "ER", "SCREEN", "Lsgreedy", "IMR", "MTCSC"};
-        // for (int dataset_idx = 0; dataset_idx < 4; dataset_idx++) {
-        for (int dataset_idx = 2; dataset_idx < 3; dataset_idx++) {
-            System.out.println("--------------------");
-            System.out.println("in dataset " + dataset_idx);
-            System.out.println("--------------------");
-            if (dataset_idx == 0) {
-                init(dataset_idx);
-                error_rate_base = 6;
-                error_rate_step = 1;
-                record = "fuel_error-rate_0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5\n";
-            } else if (dataset_idx == 1) {
-                init(dataset_idx);
-                error_rate_base = 1;
-                error_rate_step = 1;
-                record = "gps_error-rate_0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0\n";
-            } else if (dataset_idx == 2) {
-                init(dataset_idx);
-                error_rate_base = 6;
-                error_rate_step = 1;
-                record = "road_error-rate_0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5\n";
-            } else {
-                init(dataset_idx);
-                error_rate_base = 6;
-                error_rate_step = 1;
-                record = "weather_error-rate_0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5\n";
+        // AddNoise uses per-mille: P(start error) = error_rate / 1000.
+        // 10%..60% => 100, 200, 300, 400, 500, 600.
+        int[] pctList = {10, 20, 30, 40, 50, 60};
+        String[] methods = {"ARM"};
+        final int dataset_idx = 2; // road
+
+        init(dataset_idx);
+        String record = "road_error-rate_10%,20%,30%,40%,50%,60% (AddNoise per-mille 100..600)\n";
+        recordFile(record, "RMSE");
+        recordFile(record, "Precision");
+        recordFile(record, "Recall");
+        recordFile(record, "Time");
+
+        LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, seed);
+        long[] td_time = loadData.getTd_time();
+        double[][] td_clean = loadData.getTd_clean();
+        double[][] domainData = loadData.getMd();
+        KDTreeUtil kdTree = loadData.getKdTree();
+        KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
+        boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
+        System.out.println("finish load data, n=" + td_clean.length);
+        System.out.println("AddNoise error_rate is per-mille; percents " + Arrays.toString(pctList)
+                + " -> rates " + Arrays.toString(percentToPerMille(pctList)));
+
+        int nRates = pctList.length;
+        int nMethods = methods.length;
+        double[][] rmseTable = new double[nRates][nMethods];
+        long[][] timeTable = new long[nRates][nMethods];
+        int[] rateList = new int[nRates];
+
+        for (int r = 0; r < nRates; r++) {
+            int pct = pctList[r];
+            error_rate = pct * 10; // 10% -> 100 per-mille
+            rateList[r] = pct;
+            System.out.println("\n===== error rate " + pct + "% (per-mille=" + error_rate + ") =====");
+
+            double[][] td_dirty = new AddNoise(td_clean, error_rate, error_range, error_length,
+                    eta, kdTreeComplete, seed).getTd_dirty();
+            LabelData labelData = new LabelData(td_clean, td_dirty, label_rate, seed);
+            PreparedData d = new PreparedData(td_time, null, td_clean, td_dirty, domainData,
+                    labelData.getTd_label(), kdTree, kdTreeComplete, detect_clean, labelData.getTd_bool());
+
+            Analysis[] results = runRepairSuite(d, 1);
+            for (int j = 0; j < results.length; j++) {
+                rmseTable[r][j] = results[j].getRMSEValue();
+                timeTable[r][j] = results[j].getCost_time();
+                recordAnalysis(results[j]);
+                gcQuiet();
             }
-            recordFile(record, "RMSE");
-            recordFile(record, "Precision");
-            recordFile(record, "Recall");
-            recordFile(record, "Time");
-
-            // load clean series + domain constraints once; vary error_rate below
-            LoadData loadData = new LoadData(td_path, md_path, td_len, md_len, eta, seed);
-            long[] td_time = loadData.getTd_time();
-            double[][] td_clean = loadData.getTd_clean();
-            double[][] domainData = loadData.getMd();
-            KDTreeUtil kdTree = loadData.getKdTree();
-            KDTreeUtil kdTreeComplete = loadData.getKdTreeComplete();
-            boolean[] detect_clean = AnomalyDetector.detect(td_clean, p, beta);
-            System.out.println("finish load data");
-
-            int nRates = 10;
-            int nMethods = methods.length;
-            double[][] rmseTable = new double[nRates][nMethods];
-            long[][] timeTable = new long[nRates][nMethods];
-            int[] rateList = new int[nRates];
-            int rateIdx = 0;
-
-            for (error_rate = error_rate_base; error_rate <= error_rate_base + 9 * error_rate_step;
-                 error_rate += error_rate_step) {
-                double[][] td_dirty = new AddNoise(td_clean, error_rate, error_range, error_length,
-                        eta, kdTreeComplete, seed).getTd_dirty();
-                LabelData labelData = new LabelData(td_clean, td_dirty, label_rate, seed);
-                PreparedData d = new PreparedData(td_time, null, td_clean, td_dirty, domainData,
-                        labelData.getTd_label(), kdTree, kdTreeComplete, detect_clean, labelData.getTd_bool());
-
-                Analysis[] results = runRepairSuite(d, 6);
-                for (int j = 0; j < results.length; j++) {
-                    rmseTable[rateIdx][j] = results[j].getRMSEValue();
-                    timeTable[rateIdx][j] = results[j].getCost_time();
-                    recordAnalysis(results[j]);
-                    gcQuiet();
-                }
-                rateList[rateIdx++] = error_rate;
-                recordBlankLines("\n");
-            }
-
-            String outDir = "./results/" + datasetNames[dataset_idx];
-            ensureDir(outDir);
-            writeErrorRateCsv(outDir + "/rmse.csv", rateList, methods, rmseTable, null);
-            writeErrorRateCsv(outDir + "/time.csv", rateList, methods, null, timeTable);
-            System.out.println("Wrote " + outDir + "/rmse.csv and time.csv");
+            recordBlankLines("\n");
         }
+
+        String outDir = "./results/error_rate/road";
+        ensureDir(outDir);
+        writeErrorRateCsv(outDir + "/rmse.csv", rateList, methods, rmseTable, null);
+        writeErrorRateCsv(outDir + "/time.csv", rateList, methods, null, timeTable);
+        System.out.println("Wrote " + outDir + "/rmse.csv and time.csv (error_rate column is percent)");
+    }
+
+    private static int[] percentToPerMille(int[] pctList) {
+        int[] rates = new int[pctList.length];
+        for (int i = 0; i < pctList.length; i++) {
+            rates[i] = pctList[i] * 10;
+        }
+        return rates;
     }
 
     /** CSV for error-rate experiments: first column = error_rate, other columns = methods. */
     private static void writeErrorRateCsv(String path, int[] rateList, String[] methods,
                                           double[][] rmseTable, long[][] timeTable) throws IOException {
         try (BufferedWriter bw = new BufferedWriter(new FileWriter(path))) {
-            bw.write("error_rate");
+            bw.write("error_rate_pct");
             for (String method : methods) {
                 bw.write(",");
                 bw.write(method);

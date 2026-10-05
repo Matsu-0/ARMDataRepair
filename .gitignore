@@ -7,6 +7,14 @@ data/
 *model/
 *target/
 
+__pycache__/
+*.pyc
+*.pth
+*.pk
+
+# CSDI vendor artifacts (keep source; ignore downloads / checkpoints)
+baseline/CSDI/
+
 *.DS_Store
 main.pdf
 

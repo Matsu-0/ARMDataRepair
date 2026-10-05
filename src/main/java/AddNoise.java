@@ -37,10 +37,10 @@ public class AddNoise {
     }
 
     private void addNoise() {
+        for (int row = 0; row < td_clean.length; row++) {
+            System.arraycopy(td_clean[row], 0, td_dirty[row], 0, td_clean[0].length);
+        }
         if (Experiment.td_path != null && Experiment.td_path.contains("/gps/")) {
-            for (int row = 0; row < td_clean.length; row++) {
-                System.arraycopy(td_clean[row], 0, td_dirty[row], 0, td_clean[0].length);
-            }
             return;
         }
         int err_flag = 0, error_fault_num = 0, i;
@@ -51,10 +51,9 @@ public class AddNoise {
                 err_range_random = random.nextGaussian();
             }
 
-
             if (err_flag > 0) {
                 --err_flag;
-                dist = kdTree.nearestNeighborDistance(td_clean[row]);
+                dist = kdTree.nearestNeighborDistance(td_dirty[row]);
                 for (i = 0; i < 100 && dist < eta; i++) {
                     for (int col = 0; col < td_clean[0].length; col++) {
                         value_dirty = td_clean[row][col] + err_range_random * this.err_range;
@@ -66,8 +65,6 @@ public class AddNoise {
                 }
                 if (i == 100)
                     error_fault_num += 1;
-            } else {
-                System.arraycopy(td_clean[row], 0, td_dirty[row], 0, td_clean[0].length);
             }
         }
         if (error_fault_num > 0)
@@ -76,5 +73,45 @@ public class AddNoise {
 
     public double[][] getTd_dirty() {
         return td_dirty;
+    }
+
+    /**
+     * Copy {@code td_clean} and corrupt the first {@code length} rows so they
+     * violate domain constraints (same magnitude / eta loop as {@link #addNoise()}).
+     */
+    public static double[][] prefixBurst(double[][] td_clean, int length, double range,
+                                         double eta, KDTreeUtil kdTree, int seed) {
+        int n = td_clean.length;
+        int cols = td_clean[0].length;
+        double[][] dirty = new double[n][cols];
+        for (int row = 0; row < n; row++) {
+            System.arraycopy(td_clean[row], 0, dirty[row], 0, cols);
+        }
+        int burst = Math.min(Math.max(length, 0), n);
+        Random random = new Random(seed);
+        int fault = 0;
+        for (int row = 0; row < burst; row++) {
+            double err_range_random = random.nextGaussian();
+            double dist = kdTree.nearestNeighborDistance(td_clean[row]);
+            int i;
+            for (i = 0; i < 100 && dist < eta; i++) {
+                for (int col = 0; col < cols; col++) {
+                    double value_dirty = td_clean[row][col] + err_range_random * range;
+                    BigDecimal b = new BigDecimal(value_dirty);
+                    dirty[row][col] = b.setScale(5, RoundingMode.HALF_UP).doubleValue();
+                }
+                dist = kdTree.nearestNeighborDistance(dirty[row]);
+                if (dist < eta) {
+                    err_range_random = random.nextGaussian();
+                }
+            }
+            if (i == 100) {
+                fault++;
+            }
+        }
+        if (fault > 0) {
+            System.out.println("Prefix burst inject fault: " + fault + " / " + burst);
+        }
+        return dirty;
     }
 }
